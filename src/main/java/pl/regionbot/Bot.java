@@ -57,6 +57,10 @@ public final class Bot {
     private long now;
     private final Map<BlockPos, Long> blacklist = new HashMap<>();
     private String status = "Wyłączony";
+    private boolean strafeLeft = true;
+
+    /** Wirtualne klawisze bota – wstrzykiwane prosto do ruchu gracza (KeyboardInputMixin). */
+    public boolean inForward, inBack, inLeft, inRight, inJump, inSprint;
 
     private Bot() {}
 
@@ -154,7 +158,9 @@ public final class Bot {
         int top = mc.world.getBottomY() + mc.world.getHeight() - 4;
         cruiseY = Math.min(top, Math.max(p.getY(), r.max().getY()) + 25);
         dest = null;
+        rocketCd = 0;
         setState(State.TAKEOFF);
+        takeoff(mc, p);                          // skok w tym samym ticku – bez czekania
     }
 
     private void goNext(MinecraftClient mc, boolean flee) {
@@ -188,26 +194,39 @@ public final class Bot {
 
     private void takeoff(MinecraftClient mc, ClientPlayerEntity p) {
         status = "Start z elytrą → obszar " + (regionIdx + 1);
-        mc.options.forwardKey.setPressed(false);
-        mc.options.sprintKey.setPressed(false);
-        mc.options.attackKey.setPressed(false);
+        inForward = (false);
+        inSprint = (false);
+        
 
         if (!ensureElytra(mc, p)) { msg("§cBrak sprawnej elytry w ekwipunku!"); stop(); return; }
         if (!select(mc, p, s -> s.isOf(Items.FIREWORK_ROCKET), ROCKET_SLOT)) { msg("§cBrak fajerwerek!"); stop(); return; }
 
         lookYaw(p, region.topCenter());
         p.setPitch(-35f);
+        inLeft = inRight = false;
 
         if (p.isGliding()) {
-            mc.options.jumpKey.setPressed(false);
+            inJump = false;
             setState(State.ASCEND);
+            rocketCd = 0;
             useRocket(mc, p);
             return;
         }
-        // skok, a w powietrzu ponowne wciśnięcie spacji = rozłożenie elytry
-        mc.options.jumpKey.setPressed(stateTicks % 4 == 1);
-        if (!p.isOnGround() && !p.isTouchingWater() && stateTicks > 8 && stateTicks % 5 == 0) sendGlide(p);
-        if (stateTicks > 100) setState(State.TAKEOFF);
+        if (p.isOnGround() || p.isTouchingWater()) {
+            inJump = true;                       // bot sam trzyma spację = skok
+            if (p.isOnGround()) p.jump();
+            return;
+        }
+        // w powietrzu: puść i wciśnij spację ponownie (jak gracz) = rozłożenie elytry
+        inJump = (stateTicks % 2 == 0);
+        startGlide(p);
+        if (p.isGliding()) {
+            setState(State.ASCEND);
+            rocketCd = 0;
+            useRocket(mc, p);
+            return;
+        }
+        if (stateTicks > 60) setState(State.TAKEOFF);
     }
 
     private void ascend(MinecraftClient mc, ClientPlayerEntity p) {
@@ -259,8 +278,15 @@ public final class Bot {
     private boolean airborne(MinecraftClient mc, ClientPlayerEntity p) {
         if (p.isGliding()) return true;
         if (p.isOnGround() || p.isTouchingWater()) { setState(State.TAKEOFF); return false; }
-        if (stateTicks % 4 == 0) sendGlide(p);
-        return false;
+        startGlide(p);
+        return p.isGliding();
+    }
+
+    /** Rozkłada elytrę od razu (lokalnie + pakiet do serwera), tak jak wciśnięcie spacji w powietrzu. */
+    private void startGlide(ClientPlayerEntity p) {
+        if (p.isGliding()) return;
+        if (p.checkGliding()) sendGlide(p);
+        else if (stateTicks % 3 == 0) sendGlide(p);
     }
 
     private Vec3d computeDest(ClientWorld w, ClientPlayerEntity p) {
@@ -318,9 +344,15 @@ public final class Bot {
         Vec3d eye = p.getEyePos();
         Vec3d c = Vec3d.ofCenter(mineTarget);
         if (eye.distanceTo(c) <= REACH) {
-            mc.options.forwardKey.setPressed(false);
-            mc.options.sprintKey.setPressed(false);
-            mc.options.jumpKey.setPressed(false);
+            // ciągły ruch podczas kopania: krąży wokół bloku, nie wychodząc z zasięgu
+            double hd = horiz(p.getPos(), c);
+            if (p.horizontalCollision || stateTicks % 60 == 0) strafeLeft = !strafeLeft;
+            inForward = hd > 2.6;
+            inBack = hd < 1.4;
+            inLeft = strafeLeft;
+            inRight = !strafeLeft;
+            inSprint = false;
+            inJump = false;
 
             select(mc, p, s -> s.getItem() instanceof AxeItem, AXE_SLOT);
             lookAt(p, c);
@@ -350,18 +382,20 @@ public final class Bot {
 
     private void walkTo(MinecraftClient mc, ClientPlayerEntity p, Vec3d c) {
         lookAt(p, c);
-        mc.options.forwardKey.setPressed(true);
-        mc.options.sprintKey.setPressed(true);
+        inForward = true;
+        inBack = inLeft = inRight = false;
+        inSprint = true;
+        p.setSprinting(true);
         double h = horiz(p.getPos(), c);
         boolean jump = p.horizontalCollision || p.isTouchingWater() || (c.y - 0.5 > p.getY() + 1.0 && h < 2.5);
-        mc.options.jumpKey.setPressed(jump && (p.isOnGround() || p.isTouchingWater()));
+        inJump = (jump && (p.isOnGround() || p.isTouchingWater()));
     }
 
     private void waitForRegrow(MinecraftClient mc, ClientPlayerEntity p) {
         status = "Wszystko skopane – czekam na odrost";
-        mc.options.forwardKey.setPressed(false);
-        mc.options.sprintKey.setPressed(false);
-        mc.options.jumpKey.setPressed(false);
+        inForward = (false);
+        inSprint = (false);
+        inJump = (false);
         if (playerNear(mc, p) && p.isOnGround()) {
             msg("§6Gracz w pobliżu – odlatuję!");
             goTo(region, true);
@@ -483,11 +517,11 @@ public final class Bot {
         return Math.hypot(a.x - b.x, a.z - b.z);
     }
 
-    private static void releaseKeys(MinecraftClient mc) {
-        mc.options.forwardKey.setPressed(false);
-        mc.options.jumpKey.setPressed(false);
-        mc.options.sprintKey.setPressed(false);
-        mc.options.attackKey.setPressed(false);
+    private void releaseKeys(MinecraftClient mc) {
+        inForward = inBack = inLeft = inRight = false;
+        inJump = (false);
+        inSprint = (false);
+        
     }
 
     private static void msg(String s) {

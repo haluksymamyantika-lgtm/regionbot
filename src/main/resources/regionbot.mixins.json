@@ -4,7 +4,8 @@
   "package": "pl.regionbot.mixin",
   "compatibilityLevel": "JAVA_21",
   "client": [
-    "InteractionManagerAccessor"
+    "InteractionManagerAccessor",
+    "KeyboardInputMixin"
   ],
   "injectors": {
     "defaultRequire": 1
