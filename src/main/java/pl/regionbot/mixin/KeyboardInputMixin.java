@@ -23,7 +23,12 @@ public abstract class KeyboardInputMixin extends Input {
         this.playerInput = new PlayerInput(
                 bot.inForward, bot.inBack, bot.inLeft, bot.inRight,
                 bot.inJump, false, bot.inSprint);
-        this.movementForward = bot.inForward == bot.inBack ? 0.0f : (bot.inForward ? 1.0f : -1.0f);
-        this.movementSideways = bot.inLeft == bot.inRight ? 0.0f : (bot.inLeft ? 1.0f : -1.0f);
+        if (bot.analog) {
+            this.movementForward = bot.moveF;
+            this.movementSideways = bot.moveS;
+        } else {
+            this.movementForward = bot.inForward == bot.inBack ? 0.0f : (bot.inForward ? 1.0f : -1.0f);
+            this.movementSideways = bot.inLeft == bot.inRight ? 0.0f : (bot.inLeft ? 1.0f : -1.0f);
+        }
     }
 }

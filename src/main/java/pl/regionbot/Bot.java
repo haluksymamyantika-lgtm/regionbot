@@ -58,9 +58,16 @@ public final class Bot {
     private final Map<BlockPos, Long> blacklist = new HashMap<>();
     private String status = "Wyłączony";
     private boolean strafeLeft = true;
+    private int airTicks, goalTicks;
+    private Vec3d walkGoal;
+    private Vec3d lastStep = Vec3d.ZERO;
+    private final java.util.Random random = new java.util.Random();
 
     /** Wirtualne klawisze bota – wstrzykiwane prosto do ruchu gracza (KeyboardInputMixin). */
     public boolean inForward, inBack, inLeft, inRight, inJump, inSprint;
+    /** Analogowy ruch (gdy analog = true): przód/tył i bok w zakresie -1..1. */
+    public boolean analog;
+    public float moveF, moveS;
 
     private Bot() {}
 
@@ -202,31 +209,31 @@ public final class Bot {
         if (!select(mc, p, s -> s.isOf(Items.FIREWORK_ROCKET), ROCKET_SLOT)) { msg("§cBrak fajerwerek!"); stop(); return; }
 
         lookYaw(p, region.topCenter());
-        p.setPitch(-35f);
-        inLeft = inRight = false;
+        p.setPitch(-20f);
+        analog = false;
+        inBack = inLeft = inRight = false;
 
         if (p.isGliding()) {
             inJump = false;
+            // serwer potwierdził rozłożenie elytry -> od razu fajerwerka
             setState(State.ASCEND);
             rocketCd = 0;
             useRocket(mc, p);
             return;
         }
         if (p.isOnGround() || p.isTouchingWater()) {
-            inJump = true;                       // bot sam trzyma spację = skok
-            if (p.isOnGround()) p.jump();
+            // 1) trzyma spację na ziemi = zwykły skok, dokładnie jak gracz
+            inJump = true;
+            airTicks = 0;
             return;
         }
-        // w powietrzu: puść i wciśnij spację ponownie (jak gracz) = rozłożenie elytry
-        inJump = (stateTicks % 2 == 0);
-        startGlide(p);
-        if (p.isGliding()) {
-            setState(State.ASCEND);
-            rocketCd = 0;
-            useRocket(mc, p);
-            return;
-        }
-        if (stateTicks > 60) setState(State.TAKEOFF);
+        // 2) w powietrzu: puszcza spację, a gdy zaczyna opadać – wciska ją ponownie
+        //    (gra sama wtedy rozkłada elytrę, tak jak przy ręcznym kliknięciu)
+        airTicks++;
+        boolean falling = p.getVelocity().y < 0.08;
+        inJump = falling && (airTicks % 4 == 0 || airTicks % 4 == 1);
+        if (airTicks > 25 && airTicks % 8 == 0) sendGlide(p);   // awaryjnie
+        if (stateTicks > 80) setState(State.TAKEOFF);
     }
 
     private void ascend(MinecraftClient mc, ClientPlayerEntity p) {
@@ -276,17 +283,12 @@ public final class Bot {
 
     /** true = szybuje; w przeciwnym razie próbuje ponownie rozłożyć elytrę lub wystartować. */
     private boolean airborne(MinecraftClient mc, ClientPlayerEntity p) {
-        if (p.isGliding()) return true;
+        if (p.isGliding()) { inJump = false; return true; }
         if (p.isOnGround() || p.isTouchingWater()) { setState(State.TAKEOFF); return false; }
-        startGlide(p);
-        return p.isGliding();
-    }
-
-    /** Rozkłada elytrę od razu (lokalnie + pakiet do serwera), tak jak wciśnięcie spacji w powietrzu. */
-    private void startGlide(ClientPlayerEntity p) {
-        if (p.isGliding()) return;
-        if (p.checkGliding()) sendGlide(p);
-        else if (stateTicks % 3 == 0) sendGlide(p);
+        // spadł z elytry w powietrzu – ponowne "kliknięcie spacji"
+        airTicks++;
+        inJump = airTicks % 4 == 0 || airTicks % 4 == 1;
+        return false;
     }
 
     private Vec3d computeDest(ClientWorld w, ClientPlayerEntity p) {
@@ -344,18 +346,31 @@ public final class Bot {
         Vec3d eye = p.getEyePos();
         Vec3d c = Vec3d.ofCenter(mineTarget);
         if (eye.distanceTo(c) <= REACH) {
-            // ciągły ruch podczas kopania: krąży wokół bloku, nie wychodząc z zasięgu
-            double hd = horiz(p.getPos(), c);
-            if (p.horizontalCollision || stateTicks % 60 == 0) strafeLeft = !strafeLeft;
-            inForward = hd > 2.6;
-            inBack = hd < 1.4;
-            inLeft = strafeLeft;
-            inRight = !strafeLeft;
+            lookAt(p, c);
+            // ciągły ruch podczas kopania: chodzi między wolnymi miejscami w zasięgu kłody
+            goalTicks++;
+            boolean reached = walkGoal != null && horiz(p.getPos(), walkGoal) < 0.5;
+            boolean stuck = goalTicks > 12 && p.getPos().distanceTo(lastStep) < 0.05;
+            if (walkGoal == null || reached || stuck || goalTicks > 50) {
+                walkGoal = pickWalkGoal(w, p, mineTarget);
+                goalTicks = 0;
+            }
+            lastStep = p.getPos();
+            if (walkGoal != null) {
+                steerTowards(p, walkGoal);
+                inJump = p.horizontalCollision && p.isOnGround() && walkGoal.y > p.getY() + 0.5;
+            } else {
+                // brak wolnego miejsca – drepcze w lewo/prawo
+                analog = false;
+                if (stateTicks % 20 == 0) strafeLeft = !strafeLeft;
+                inForward = inBack = false;
+                inLeft = strafeLeft;
+                inRight = !strafeLeft;
+                inJump = false;
+            }
             inSprint = false;
-            inJump = false;
 
             select(mc, p, s -> s.getItem() instanceof AxeItem, AXE_SLOT);
-            lookAt(p, c);
             Direction side = Direction.getFacing(eye.x - c.x, eye.y - c.y, eye.z - c.z);
             ((InteractionManagerAccessor) mc.interactionManager).regionbot$setBlockBreakingCooldown(0);
             mc.interactionManager.updateBlockBreakingProgress(mineTarget, side);
@@ -380,8 +395,49 @@ public final class Bot {
         }
     }
 
+    /** Losowe miejsce do stania (twardy blok pod nogami, 2 wolne nad nim), z którego kłoda jest w zasięgu. */
+    private Vec3d pickWalkGoal(ClientWorld w, ClientPlayerEntity p, BlockPos target) {
+        Vec3d best = null;
+        for (int attempt = 0; attempt < 40; attempt++) {
+            int dx = random.nextInt(7) - 3;
+            int dz = random.nextInt(7) - 3;
+            for (int dy = 1; dy >= -3; dy--) {
+                BlockPos feet = target.add(dx, dy, dz);
+                if (!w.getBlockState(feet).getCollisionShape(w, feet).isEmpty()) continue;
+                if (!w.getBlockState(feet.up()).getCollisionShape(w, feet.up()).isEmpty()) continue;
+                BlockPos below = feet.down();
+                if (w.getBlockState(below).getCollisionShape(w, below).isEmpty()) continue;
+                Vec3d stand = new Vec3d(feet.getX() + 0.5, feet.getY(), feet.getZ() + 0.5);
+                Vec3d eye = stand.add(0, 1.62, 0);
+                if (eye.distanceTo(Vec3d.ofCenter(target)) > REACH - 0.4) break;
+                if (horiz(stand, p.getPos()) < 1.0) break;
+                if (Math.abs(stand.y - p.getY()) > 1.2) break;
+                return stand;
+            }
+        }
+        return best;
+    }
+
+    /** Idzie w stronę punktu niezależnie od tego, gdzie patrzy (analogowe W/A/S/D). */
+    private void steerTowards(ClientPlayerEntity p, Vec3d goal) {
+        double dx = goal.x - p.getX(), dz = goal.z - p.getZ();
+        double len = Math.sqrt(dx * dx + dz * dz);
+        if (len < 1.0E-4) { analog = true; moveF = moveS = 0f; return; }
+        dx /= len; dz /= len;
+        double yaw = Math.toRadians(p.getYaw());
+        double sin = Math.sin(yaw), cos = Math.cos(yaw);
+        moveF = (float) (-dx * sin + dz * cos);
+        moveS = (float) (dx * cos + dz * sin);
+        analog = true;
+        inForward = moveF > 0.3f;
+        inBack = moveF < -0.3f;
+        inLeft = moveS > 0.3f;
+        inRight = moveS < -0.3f;
+    }
+
     private void walkTo(MinecraftClient mc, ClientPlayerEntity p, Vec3d c) {
         lookAt(p, c);
+        analog = false;
         inForward = true;
         inBack = inLeft = inRight = false;
         inSprint = true;
@@ -519,6 +575,8 @@ public final class Bot {
 
     private void releaseKeys(MinecraftClient mc) {
         inForward = inBack = inLeft = inRight = false;
+        analog = false;
+        moveF = moveS = 0f;
         inJump = (false);
         inSprint = (false);
         
