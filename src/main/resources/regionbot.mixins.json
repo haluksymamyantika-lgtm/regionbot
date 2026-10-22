@@ -1,0 +1,12 @@
+{
+  "required": true,
+  "minVersion": "0.8",
+  "package": "pl.regionbot.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "client": [
+    "InteractionManagerAccessor"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}

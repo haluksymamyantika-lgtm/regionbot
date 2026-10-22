@@ -1,0 +1,20 @@
+{
+  "schemaVersion": 1,
+  "id": "regionbot",
+  "version": "${version}",
+  "name": "RegionBot",
+  "description": "Zaznaczanie obszarów (J), menu (L), bot latający na elytrze i kopiący drewno w generatorach.",
+  "authors": ["RegionBot"],
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": ["pl.regionbot.RegionBotClient"]
+  },
+  "mixins": ["regionbot.mixins.json"],
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.4",
+    "java": ">=21",
+    "fabric-api": "*"
+  }
+}
