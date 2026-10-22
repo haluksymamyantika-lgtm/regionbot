@@ -138,6 +138,7 @@ public final class Bot {
             case WAIT -> waitForRegrow(mc, p);
             default -> {}
         }
+        if (state != State.IDLE) syncKeys(mc);
     }
 
     private void setState(State s) {
@@ -222,17 +223,20 @@ public final class Bot {
             return;
         }
         if (p.isOnGround() || p.isTouchingWater()) {
-            // 1) trzyma spację na ziemi = zwykły skok, dokładnie jak gracz
+            // 1) skok – dokładnie to, co robi gra po wciśnięciu spacji na ziemi
             inJump = true;
             airTicks = 0;
+            if (p.isOnGround()) p.jump();
             return;
         }
-        // 2) w powietrzu: puszcza spację, a gdy zaczyna opadać – wciska ją ponownie
-        //    (gra sama wtedy rozkłada elytrę, tak jak przy ręcznym kliknięciu)
+        // 2) w powietrzu: gdy zaczyna opadać – "drugie kliknięcie spacji" = rozłożenie elytry
+        //    (ta sama funkcja i ten sam pakiet, które gra wysyła przy ręcznym kliknięciu)
         airTicks++;
-        boolean falling = p.getVelocity().y < 0.08;
-        inJump = falling && (airTicks % 4 == 0 || airTicks % 4 == 1);
-        if (airTicks > 25 && airTicks % 8 == 0) sendGlide(p);   // awaryjnie
+        inJump = false;
+        if (airTicks >= 3 && p.getVelocity().y < 0.1 && airTicks % 3 == 0) {
+            if (p.checkGliding()) sendGlide(p);
+            else sendGlide(p);
+        }
         if (stateTicks > 80) setState(State.TAKEOFF);
     }
 
@@ -287,7 +291,8 @@ public final class Bot {
         if (p.isOnGround() || p.isTouchingWater()) { setState(State.TAKEOFF); return false; }
         // spadł z elytry w powietrzu – ponowne "kliknięcie spacji"
         airTicks++;
-        inJump = airTicks % 4 == 0 || airTicks % 4 == 1;
+        inJump = false;
+        if (airTicks % 4 == 0) { if (p.checkGliding()) sendGlide(p); else sendGlide(p); }
         return false;
     }
 
@@ -347,27 +352,12 @@ public final class Bot {
         Vec3d c = Vec3d.ofCenter(mineTarget);
         if (eye.distanceTo(c) <= REACH) {
             lookAt(p, c);
-            // ciągły ruch podczas kopania: chodzi między wolnymi miejscami w zasięgu kłody
-            goalTicks++;
-            boolean reached = walkGoal != null && horiz(p.getPos(), walkGoal) < 0.5;
-            boolean stuck = goalTicks > 12 && p.getPos().distanceTo(lastStep) < 0.05;
-            if (walkGoal == null || reached || stuck || goalTicks > 50) {
-                walkGoal = pickWalkGoal(w, p, mineTarget);
-                goalTicks = 0;
-            }
-            lastStep = p.getPos();
-            if (walkGoal != null) {
-                steerTowards(p, walkGoal);
-                inJump = p.horizontalCollision && p.isOnGround() && walkGoal.y > p.getY() + 0.5;
-            } else {
-                // brak wolnego miejsca – drepcze w lewo/prawo
-                analog = false;
-                if (stateTicks % 20 == 0) strafeLeft = !strafeLeft;
-                inForward = inBack = false;
-                inLeft = strafeLeft;
-                inRight = !strafeLeft;
-                inJump = false;
-            }
+            // podczas kopania bot cały czas trzyma W
+            analog = false;
+            inForward = true;
+            inBack = inLeft = inRight = false;
+            inJump = p.horizontalCollision && p.isOnGround() && stateTicks % 10 == 0;
+            pushForward(p);
             inSprint = false;
 
             select(mc, p, s -> s.getItem() instanceof AxeItem, AXE_SLOT);
@@ -435,6 +425,25 @@ public final class Bot {
         inRight = moveS < -0.3f;
     }
 
+    /** Ruch do przodu bezpośrednio (gdyby gra pominęła wciśnięte W). */
+    private static void pushForward(ClientPlayerEntity p) {
+        if (!p.isOnGround()) return;
+        Vec3d v = p.getVelocity();
+        if (Math.hypot(v.x, v.z) > 0.09) return;
+        double yaw = Math.toRadians(p.getYaw());
+        p.setVelocity(-Math.sin(yaw) * 0.11, v.y, Math.cos(yaw) * 0.11);
+    }
+
+    /** Odzwierciedla wirtualne klawisze na prawdziwych klawiszach gry (W, spacja, sprint). */
+    private void syncKeys(MinecraftClient mc) {
+        mc.options.forwardKey.setPressed(inForward);
+        mc.options.backKey.setPressed(inBack);
+        mc.options.leftKey.setPressed(inLeft);
+        mc.options.rightKey.setPressed(inRight);
+        mc.options.jumpKey.setPressed(inJump);
+        mc.options.sprintKey.setPressed(inSprint);
+    }
+
     private void walkTo(MinecraftClient mc, ClientPlayerEntity p, Vec3d c) {
         lookAt(p, c);
         analog = false;
@@ -442,6 +451,7 @@ public final class Bot {
         inBack = inLeft = inRight = false;
         inSprint = true;
         p.setSprinting(true);
+        pushForward(p);
         double h = horiz(p.getPos(), c);
         boolean jump = p.horizontalCollision || p.isTouchingWater() || (c.y - 0.5 > p.getY() + 1.0 && h < 2.5);
         inJump = (jump && (p.isOnGround() || p.isTouchingWater()));
@@ -579,6 +589,7 @@ public final class Bot {
         moveF = moveS = 0f;
         inJump = (false);
         inSprint = (false);
+        syncKeys(mc);
         
     }
 
